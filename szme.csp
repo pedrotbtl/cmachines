@@ -1,0 +1,220 @@
+-- Szymanski's algorithm
+
+-- A mutual exclusion algorithm as a lesson on abstracting decentralised
+-- models of shared variable prograpns.
+
+-- In this model we allow finite collection of agents who compete to
+-- perform a critical section.
+
+datatype PNAMES = Alice | Bob | Cameron  | Diana | Eliza | Fred | Gloria
+Proc(1) = Alice
+Proc(2) = Bob
+Proc(3) = Cameron
+Proc(4) = Diana
+Proc(5) = Eliza
+Proc(6) = Fred
+Proc(7) = Gloria
+PNAMESR = {Proc(n) | n <- {1..NN}}
+datatype IVARNAMES = IV.{1,2,3,4,5,6,7}
+
+-- We model entering an leaving  the critical section with the following
+-- events, which we include for specification purposes only.
+
+channel css,cse:PNAMES
+
+-- As this is a decentralised model, and we assume that both the threads
+-- and variables are capable of being implemented using a set of agents whose
+-- emergent behaviour is reliable.  What we model in this file is the
+-- emergent behaviour of these entities, but the way they are modeled
+-- makes significant concessions to the underlying implementation.
+
+-- In particular, we model the actions of reading and writing a variable as
+-- having a beginning and an end that are assumed to bracket the potentially
+-- complex actions of ensuring that values are written and read between 
+-- decentralised systems.  The begin actions are the start, and the end actions
+-- come after the transaction is finished.  
+
+-- So writei1 amd writei2 are respectively the beginning and end of a write.
+-- We assume that each location is written by any thread, and read by any thread
+-- other than this writer.  The actions of a single thread on one location do
+-- not overlap, but the alphabet would allow multiple reads/writes by the
+-- same thread to overlap.
+
+-- Szymanski's algorithm has one flag variable each, varying over a small range
+-- of integers,
+
+-- The role of the fix channel will be described shortly.
+
+-- We certainly need to allow the actions of different threads on one variable
+-- to overlap.
+
+channel writei1: IVARNAMES.PNAMESR.{0,1,2,3,4,5} 
+channel writei2: IVARNAMES.PNAMESR 
+channel readi1: IVARNAMES.PNAMESR
+channel readi2: IVARNAMES.PNAMESR.{0,1,2,3,4,5}
+channel fix: IVARNAMES.{0,1,2,3,4,5}
+
+-- In this version of a location its value relative to writes
+-- is either settled or not, hence the following two states.
+-- Being decentralised, we assume that read values require some
+-- sort of consensus. 
+-- It has a most recent consensus on what a read of it will
+-- show.  This consensus, in general, will have been formed
+-- after some reads started, and they can return this value, while
+-- ones started since need a new fix before they can deliver.  So
+-- three parameters are the before and after fix reads, and the most
+-- recent fix.  There is only ever one read active per thread, and
+-- these are distinct from p, the writer.
+Comp(p,B,A) = diff(PNAMESR,Union({{p},A,B}))
+
+Dvari(v,x,p,BFR,AFR,f) = writei1.v.p?y -> Dvariw(v,x,y,p,BFR,AFR,f)
+             [] readi1.v?q:Comp(p,AFR,BFR) -> Dvari(v,x,p,union({q},BFR),AFR,f)
+             [] fix.v.x -> Dvari(v,x,p,{},union(BFR,AFR),x)
+             [] readi2.v?q:AFR!f -> Dvari(v,x,p,BFR,diff(AFR,{q}),f) 
+
+-- Above, a fix while there is no active write can only one conclusion.
+-- Below, a fix while there is an active write can come to one of two.
+
+Dvariw(v,x,y,p,BFR,AFR,f) = writei2.v.p -> Dvari(v,y,p,BFR,AFR,f)
+             [] readi1.v?q:Comp(p,AFR,BFR) -> Dvariw(v,x,y,p,union({q},BFR),AFR,f)
+             [] fix.v.x -> Dvariw(v,x,y,p,{},union(BFR,AFR),x)
+             [] fix.v.y -> Dvariw(v,y,y,p,{},union(BFR,AFR),y) -- *****
+             [] readi2.v?q:AFR!f -> Dvariw(v,x,y,p,BFR,diff(AFR,{q}),f) 
+-- If the starred line had the second parameter of the result state made x,
+-- this would allow a subsequent fix to fix on an older value than this one.
+-- This model would kill correctness, meaning that this algorithm depends
+-- on monotonic fixing. 
+
+-------------
+-- Initially there are no active reads or writes, and the value and the 
+-- fix are both 0.
+
+
+Var(n) = compress(Dvari(flag(n),0,Proc(n),{},{},0)\{|fix|})
+              
+
+flag(i) = IV.i
+
+
+WriteI(p,v,x) = writei1.v.p.x -> writei2.v.p -> SKIP
+ReadI1(p,v) = readi1.v.p -> SKIP
+
+NN = 5 -- number of threads
+
+-- In the algorithm the variables are meant to be addressed in
+-- consistent order.  We define the obvious order here.
+scanvars(i) = <flag(j) | j <- <1..NN>, j != i >
+ltvars(i) = <flag(j) | j <- <1..i-1>>
+gtvars(i) = <flag(j) | j <- <i+1..NN>>
+
+SEQ(<>) = SKIP
+SEQ(<P>^PS) = P;SEQ(PS)
+
+-- The algorithm itself runs though various phases of waiting which are
+-- encoded below, with these being interspersed with assignments to the flag 
+-- variable
+
+Await1(i) = Await1b(i,scanvars(i),{})
+
+Await1b(i,<>,vals) = if diff(vals,{0,1,2})=={} then SKIP else Await1(i)
+
+Await1b(i,<v>^vs,vals) = readi1.v.Proc(i) -> readi2.v.Proc(i)?x -> Await1b(i,vs,union({x},vals))
+
+Cond(i) = Cond2(i,scanvars(i),{})
+
+Cond2(i,<>,vals) = if member(1,vals) then  
+                   (WriteI(Proc(i),flag(i),2); Await2(i))
+                   else SKIP
+
+Cond2(i,<v>^vs,vals) = readi1.v.Proc(i) -> readi2.v.Proc(i)?x -> Cond2(i,vs,union({x},vals))
+                    
+
+Await2(i) = Await2b(i,scanvars(i),{})
+
+Await2b(i,<>,vals) = if member(4,vals) then SKIP else Await2(i)
+
+Await2b(i,<v>^vs,vals) = readi1.v.Proc(i) -> readi2.v.Proc(i)?x -> Await2b(i,vs,union({x},vals))
+
+Await3(i) = Await3b(i,ltvars(i),{})
+
+Await3b(i,<>,vals) = if diff(vals,{0,1})=={} then SKIP else Await3(i)
+
+Await3b(i,<v>^vs,vals) = readi1.v.Proc(i) -> readi2.v.Proc(i)?x -> Await3b(i,vs,union({x},vals))
+       
+Await4(i) = Await4b(i,gtvars(i),{})
+
+Await4b(i,<>,vals) = if diff(vals,{0,1,4})=={} then SKIP else Await4(i)
+
+Await4b(i,<v>^vs,vals) = readi1.v.Proc(i) -> readi2.v.Proc(i)?x -> Await4b(i,vs,union({x},vals))
+
+
+CS(i) = css.Proc(i) -> cse.Proc(i) -> SKIP 
+
+-- The main loop:
+
+Szym(n) = WriteI(Proc(n),flag(n),1);
+          Await1(n);
+          WriteI(Proc(n),flag(n),3);
+          Cond(n);
+          WriteI(Proc(n),flag(n),4);
+          Await3(n);
+          CS(n);
+          Await4(n);
+          CS(n);
+          WriteI(Proc(n),flag(n),0);
+          Szym(n)
+
+
+Threads = ||| n:{1..NN} @ Szym(n)
+
+transparent sbisim, diamond,wbisim
+
+compress(P) = sbisim(diamond(P))
+
+--compress(P) = wbisim(P)
+
+Vars = ||| n:{1..NN} @ Var(n)
+
+System = Threads [|{|writei1,writei2,
+                    readi1,readi2|}|] Vars
+
+-- The compression above just acts on the hidden fix events.
+-- The version below hides the actions between a thread and
+-- its own flag.
+
+Combo(n) = compress(
+(Var(n)
+[|{|writei1,writei2,readi1.flag(n).Proc(n),readi2.flag(n).Proc(n)|}|]
+Szym(n))\{|writei1,writei2|})
+
+Alpha(n) = {|readi1.flag(n), readi2.flag(n), 
+             readi1.flag(m).Proc(n), readi2.flag(m).Proc(n),
+             css.Proc(n),cse.Proc(n) | m <- {1..NN}|}
+
+System2 = || n:{1..NN} @[Alpha(n)] Combo(n)
+
+DCombo(n) = compress(Combo(n)[Alpha(n) || Alpha(n+1)] Combo(n+1))\inter(Alpha(n),Alpha(n+1))
+
+AlphaD(n) = union(Alpha(n),Alpha(n+1))
+
+AlphaX = Union({Alpha(n) | n <- {1..NN-1}})
+
+System3 = if NN==2*(NN/2) then (|| n:{1..NN/2} @[AlphaD(2*n-1)] DCombo(2*n-1))
+          else 
+  (|| n:{1..NN/2} @[AlphaD(2*n-1)] DCombo(2*n-1))[AlphaX||Alpha(NN)]Combo(NN)
+
+MutexSpec = css?x -> cse.x -> MutexSpec
+
+-- The basic specification.
+
+assert MutexSpec [T= System \ diff(Events,{|css,cse|})
+assert MutexSpec [T= System2 \ diff(Events,{|css,cse|})
+assert MutexSpec [T= System3 \ diff(Events,{|css,cse|})
+
+Mutexes(n) = n>0 & css?x -> cse!x -> Mutexes(n-1)
+
+-- The following just demonstrates that it can perform a series of
+-- critical sections.
+
+assert Mutexes(10) [T= System2 \ diff(Events,{|css,cse|})
+

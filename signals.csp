@@ -1,0 +1,210 @@
+-- Decisions and values
+datatype Decisions = V1 | V2
+datatype Vals = Null | Dec.{V1}
+
+-- Primary machine parameters
+PN = 3          -- Number of nodes
+PG = 2          -- Number of good nodes
+PNS = {0..PN-1}  -- Node "ids
+-- PT = 3          -- Threshold for a decision;
+PT = PG/2 + PN - PG + 1
+                -- i.e. PT individual decisions are
+                -- are necessary for a G machine decision
+
+
+-- As per above but for the secondary i.e. H machine
+SN = 4
+SG = 3
+SNS = {0..SN-1}
+-- ST = 3
+ST = SG/2 + SN - SG + 1
+
+-- Assumptions:
+-- Each component in G either pre-decide on V1 or disagree with this predecision --- i.e. a Null pre-decision
+--      They cannot pre-decide on another value like V2, it is either an endorsement of V1 or nothing.
+-- Each (good) component in H wait to read either a single pre-decision on V1 or all node in G having chosen a Null pre-decision.
+--      This behaviour relies on an implicit assumption that there is a known bound D on the time it takes from an H component to read a G location.
+--      With this assumption, the behaviour of such a component can be after waiting for D (plus maybe some clock drift), either you got a pre-decision or nothing.
+-- So in this model we are in the realm of *synchronous communication*.
+-- Insight: If we have at least one good component for a decision in each machine, safety is accomplished.
+
+
+-- Threshold of *non-started* H nodes that need to be seen by a 
+-- G component to make it believe that machine H has started.
+STT = SN - 1
+
+-- Number of pre-decisions that a H component must see to 
+-- decide on V1
+PDT = 2*PN - PG - PT
+
+-- Number of "null"-decision that a H component must see to
+-- decision on V2
+NDT = 2*PN - PG - PT
+
+
+-- G components use to write pre-decision to its local store
+channel set_predec : PNS.Vals
+-- H components can read a G component pre-decision via it
+channel predec : PNS.SNS.Vals
+
+-- Decision for G components
+channel dec_p : PNS.Decisions
+-- Decision for H components
+channel dec_s : SNS.Decisions
+
+-- Timeout for H components
+channel timeout : SNS
+
+-- H components can write to their local store they are alive
+channel set_started : SNS
+-- G components can read the "started" location of H components
+channel started : PNS.SNS.Bool
+
+-- Behaviour of a pre-decision location for a component in G
+Predec(g) = set_predec.g?v -> RUN({predec.g.h.v | h <- SNS})
+            []
+            predec.g?h!Null -> Predec(g)
+
+-- Aux function for a G component to check if STT many components
+-- of H have started.
+CheckStarted(g,NS) = 
+    started.g?h:diff(SNS,NS)!false -> CheckStarted(g,union(NS,{h}))
+    []
+    started.g?h!true -> CheckStarted(g,NS)
+    []
+    card(NS) > STT & SKIP
+    
+
+-- Control behaviour of a G component
+P(g) = set_predec.g.Dec.V1 -> CheckStarted(g,{}); RUN({dec_p.g.V1})
+       []
+       set_predec.g.Null -> STOP
+-- This process is either a good primary component or a bad one
+PP(g) = 
+    if g < PG then 
+        P(g) [|{|set_predec|}|] Predec(g) -- Good G component
+    else 
+        CHAOS({|dec_p.g, predec.g|})
+
+-- Alphabet of a G component
+AlphaPP(g) = {|predec.g,dec_p.g,started.g,set_predec.g|}
+
+-- Start location of a secondary (i.e. H) component
+Start(h) = set_started.h -> Started(h)
+           []
+           started?g!h.false -> Start(h)
+
+Started(h) = started?g!h.true -> Started(h)
+
+-- Process for a H component to check if enough G components have
+-- come to a pre-decision
+CheckPredec(h,AS,NS) =
+    let US = union(AS,NS) within    
+        predec?g:diff(PNS,US)!h.Null -> CheckPredec(h,AS,union(NS,{g}))
+        []
+        predec?g:diff(PNS,US)!h.Dec.V1 -> CheckPredec(h,union(AS,{g}),NS)
+        []
+        --- What I need to see to confirm a pre-decision does not exist
+        card(NS) > NDT & RUN({dec_s.h.V2})
+        []
+        --- What I need to see to confirm a pre-decision
+        card(AS) > PDT & RUN({dec_s.h.V1})
+
+
+
+-- Control behaviour of a secondary component
+S(h) = timeout.h -> set_started.h -> CheckPredec(h, {}, {})
+
+-- Either good or bad secondary component
+SS(h) = 
+    if h < SG then 
+        S(h) [|{|set_started|}|] Start(h) -- Good H component
+    else 
+        CHAOS(union({|dec_s.h|},{|started.g.h | g <- PNS |})) -- Bad H component
+
+-- Alphabet of secondary component
+AlphaSS(h) = union({|timeout.h, dec_s.h, set_started.h|},{| predec.g.h, started.g.h | g <- PNS |})
+
+transparent sbisim, diamond
+compress(P) = sbisim(diamond(P))
+
+-- Primary mechanism
+PPS = || g : PNS @ [AlphaPP(g)] compress(PP(g))
+
+-- Secondary mechanism
+SSS = || h : SNS @ [AlphaSS(h)] compress(SS(h))
+
+-- System
+SYSTEM = PPS [|{|predec,started|}|] SSS
+
+-- System with watchdogs for a decision of g and h
+DEC_SYSTEM = SYSTEM [|{|dec_p,dec_s|}|] (Decider_p({}) ||| Decider_s({},{}))
+
+channel decision_p
+channel decision_s : Decisions
+
+-- Watchdog for a decision of G
+Decider_p(DS) = 
+    if card(DS) < PT then
+        dec_p?g:diff(PNS,DS)!V1 -> Decider_p(union(DS,{g}))
+    else 
+        decision_p -> STOP
+
+-- Watchdog for a decision of H
+Decider_s(V1S,V2S) =
+    let US = union(V1S,V2S) within
+        if card(V1S) >= ST then
+            decision_s.V1 -> STOP
+        else if card(V2S) >= ST then
+            decision_s.V2 -> STOP
+        else
+            dec_s?h:diff(SNS,US)!V1 -> Decider_s(union(V1S,{h}),V2S)
+            []
+            dec_s?h:diff(SNS,US)!V2 -> Decider_s(V1S, union(V2S,{h}))
+
+
+
+-- A machine can decide; the shortest counter-example is for G
+assert STOP [T= DEC_SYSTEM \ diff(Events,{|decision_p|})
+
+-- Machine H can decide on V1
+assert STOP [T= DEC_SYSTEM \ diff(Events,{|decision_s.V1|})
+
+-- Machine H can decide on V2
+assert STOP [T= DEC_SYSTEM \ diff(Events,{|decision_s.V2|})
+
+SAFE = decision_p -> decision_s.V1 -> STOP
+     []
+       decision_s.V2 -> STOP
+       []
+       decision_s.V1 -> decision_p -> STOP
+
+-- The machines cannot decide for different values.
+-- We should probably check that H itself does not decide different values,
+-- but we leave it for later for now.
+assert SAFE [T= DEC_SYSTEM \ diff(Events,{|decision_p, decision_s|})
+
+LIVE = 
+    |~| ev : Events @ ev -> 
+        if member(ev,{|decision_s, decision_p|}) then CHAOS(Events)
+        else LIVE
+
+CONVERGENCE = 
+    RUN({set_predec.g.Dec.V1 | g <- {0..PG-1}})
+    |~|
+    RUN({set_predec.g.Null | g <- {0..PG-1}})
+
+assert LIVE [F= DEC_SYSTEM [|{|set_predec|}|] CONVERGENCE
+
+assert LIVE [F= DEC_SYSTEM
+
+-- A machine can decide; the shortest counter-example is for G
+assert STOP [T= DEC_SYSTEM [|{|set_predec|}|] CONVERGENCE \ diff(Events,{|decision_p|})
+
+-- Machine H can decide on V1
+assert STOP [T= DEC_SYSTEM [|{|set_predec|}|] CONVERGENCE \ diff(Events,{|decision_s.V1|})
+
+-- Machine H can decide on V2
+assert STOP [T= DEC_SYSTEM [|{|set_predec|}|] CONVERGENCE \ diff(Events,{|decision_s.V2|})
+
+

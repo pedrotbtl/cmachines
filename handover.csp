@@ -1,0 +1,136 @@
+datatype Decisions = V1 | V2
+
+datatype storevals1 = Null1 | Predec.Decisions
+datatype storevals2 = Null2 | FinalDec.Decisions
+datatype storevalsS = NullS | Started
+
+
+
+
+channel startread1, startread2, startreadS, endwriteS, endwrite1, endwrite2, timeout
+channel startwrite1,read1:storevals1
+channel startwrite2,read2:storevals2
+channel startwriteS,readS:storevalsS
+channel predecide, decide, decideS: Decisions
+
+PS1(x) = startread1 -> PSr1(x)
+         [] startwrite1?z -> PSw1(x,z) 
+
+PSr1(x) = read1.x -> PS1(x)
+         [] startwrite1?z -> PSrw1(x,z)
+
+PSw1(x,z) = endwrite1 -> PS1(z)
+         [] startread1 -> PSrw1(x,z)
+
+PSrw1(x,z) = endwrite1 -> PSrx1(x,z)
+         [] (read1.x -> PSw1(x,z) |~| read1.z -> PSw1(x,z))
+
+PSrx1(x,z) = read1.x -> PS1(z) 
+             |~| read1.z -> PS1(z)
+
+-------
+
+PS2(x) = startread2 -> PSr2(x)
+         [] startwrite2?z -> PSw2(x,z) 
+
+PSr2(x) = read2.x -> PS2(x)
+         [] startwrite2?z -> PSrw2(x,z)
+
+PSw2(x,z) = endwrite2 -> PS2(z)
+         [] startread2 -> PSrw2(x,z)
+
+PSrw2(x,z) = endwrite2 -> PSrx2(x,z)
+         [] (read2.x -> PSw2(x,z) |~| read2.z -> PSw2(x,z))
+
+PSrx2(x,z) = read2.x -> PS2(z) 
+             |~| read2.z -> PS2(z)
+
+-------
+
+SS(x) = startreadS -> SSr(x)
+         [] startwriteS?z -> SSw(x,z) 
+
+SSr(x) = readS.x -> SS(x)
+         [] startwriteS?z -> SSrw(x,z)
+
+SSw(x,z) = endwriteS -> SS(z)
+         [] startreadS -> SSrw(x,z)
+
+SSrw(x,z) = endwriteS -> SSrx(x,z)
+         [] (readS.x -> SSw(x,z) |~| readS.z -> SSw(x,z))
+
+SSrx(x,z) = readS.x -> SS(z) 
+             |~| readS.z -> SS(z)
+
+-------
+
+PM = predecide.V1 -> endwrite1 -> startreadS -> readS.NullS -> decide.V1 -> endwrite2 -> STOP
+
+SM = timeout -> startread2 -> read2.Null2 ->
+ startwriteS.Started -> endwriteS -> startread1 ->
+ (read1.Null1 -> decideS.V2 -> STOP
+  [] ([] v:Decisions @ 
+        read1.Predec.v -> decideS.v -> STOP))
+
+-- in the above version the predecide.V1 starts a
+-- write to S1 and decide.V1 starts the second 
+-- write, which seems natural.
+
+-- However in SM we keep the read finalisations
+-- separate from the events these events decide, 
+-- namely whether to do anything at all as the
+-- secondary and whether to copy a PM pre-decision
+-- or do its own sums.
+
+-- Thus we need to do some renaming
+
+PMren = PM[[predecide.v <- startwrite1.Predec.v, decide.v <- startwrite2.FinalDec.v | v <- Decisions]]
+
+CMS = (PMren[|Events|]CHAOS(Events)) ||| SM
+
+-- Note how the primary machine is capable
+-- of deadlocking at any time
+
+Signals = PS1(Null1) ||| PS2(Null2) ||| SS(NullS)
+
+System = CMS [|{|startwrite1,startwrite2,startwriteS, endwrite1,endwrite2, endwriteS, startread1, startread2,startreadS, read1, read2, readS|}|] Signals
+
+
+-- Specifications
+-- We want a safety and a liveness specification to-- hold, namely
+
+-- However many decisions there are, they 
+-- are the same
+
+RUN(X) = [] x:X @ x -> RUN(X)
+
+DV(v) = RUN({decideS.v, startwrite2.FinalDec.v})
+
+ASf = {decideS.v,startwrite2.FinalDec.v | v <- Decisions}
+
+Safety = CHAOS(Events) [| ASf |] (DV(V1) [] DV(V2))
+
+OneDec = CHAOS(Events) [| ASf |] ([]x:ASf @ x -> STOP)
+
+-- we do not expect the above to hold
+
+assert Safety [T= System
+assert OneDec [T= System
+
+-- Liveness: a decision will be reached
+
+-- Process that is deadlock free until an
+-- event in X has happened, placing no
+-- constraint on traces.
+
+DFU(X) = |~| x:Events @ x -> (if member(x,X) then CHAOS(Events) else DFU(X))
+
+assert DFU(ASf) [F= System
+
+-- we do not expect the folowing, because it says
+-- that there will always be a decision from PS
+-- though we have allowed PM to block SM if it
+-- decides early.
+
+assert DFU({|decideS|}) [F= System
+
