@@ -64,7 +64,9 @@ SSrx(x,z) = readS.x -> SS(z)
 
 -------
 
-PM = predecide.V1 -> endwrite1 -> startreadS -> readS.NullS -> decide.V1 -> endwrite2 -> STOP
+PM = predecide.V1 -> endwrite1 -> startreadS -> readS?state -> 
+     if state == Started then STOP 
+     else decide.V1 -> endwrite2 -> STOP
 
 SM = timeout -> startread2 -> read2.Null2 ->
  startwriteS.Started -> endwriteS -> startread1 ->
